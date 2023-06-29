@@ -41,6 +41,11 @@ const (
 	SearchQueryKey             = "q"
 	SearchResolveKey           = "resolve"
 	SearchTypeKey              = "type"
+
+	/* Web endpoint keys */
+
+	WebUsernameKey = "username"
+	WebStatusIDKey = "status"
 )
 
 // parseError returns gtserror.WithCode set to 400 Bad Request, to indicate
@@ -177,6 +182,26 @@ func ParseSearchLookup(value string) (string, gtserror.WithCode) {
 
 func ParseSearchQuery(value string) (string, gtserror.WithCode) {
 	key := SearchQueryKey
+
+	if value == "" {
+		return "", requiredError(key)
+	}
+
+	return value, nil
+}
+
+func ParseWebUsername(value string) (string, gtserror.WithCode) {
+	key := WebUsernameKey
+
+	if value == "" {
+		return "", requiredError(key)
+	}
+
+	return value, nil
+}
+
+func ParseWebStatusID(value string) (string, gtserror.WithCode) {
+	key := WebStatusIDKey
 
 	if value == "" {
 		return "", requiredError(key)

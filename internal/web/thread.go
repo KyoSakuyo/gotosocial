@@ -36,66 +36,91 @@ import (
 func (m *Module) threadGETHandler(c *gin.Context) {
 	ctx := c.Request.Context()
 
+	// Don't require auth for web endpoints,
+	// but do take it if it was provided.
 	authed, err := oauth.Authed(c, false, false, false, false)
 	if err != nil {
 		apiutil.WebErrorHandler(c, gtserror.NewErrorUnauthorized(err, err.Error()), m.processor.InstanceGetV1)
 		return
 	}
 
-	// usernames on our instance will always be lowercase
-	username := strings.ToLower(c.Param(usernameKey))
-	if username == "" {
-		err := errors.New("no account username specified")
-		apiutil.WebErrorHandler(c, gtserror.NewErrorBadRequest(err, err.Error()), m.processor.InstanceGetV1)
-		return
-	}
+	// requestingAccount may be nil, depending
+	// on how they authed (if at all).
+	requestingAccount := authed.Account
 
-	// status ids will always be uppercase
-	statusID := strings.ToUpper(c.Param(statusIDKey))
-	if statusID == "" {
-		err := errors.New("no status id specified")
-		apiutil.WebErrorHandler(c, gtserror.NewErrorBadRequest(err, err.Error()), m.processor.InstanceGetV1)
-		return
-	}
-
+	// We'll need the instance later, and we can also use it
+	// before then to make it easier to return a web error.
 	instance, err := m.processor.InstanceGetV1(ctx)
 	if err != nil {
 		apiutil.WebErrorHandler(c, gtserror.NewErrorInternalError(err), m.processor.InstanceGetV1)
 		return
 	}
 
+	// Return instance we already got from the db,
+	// don't try to fetch it again when erroring.
 	instanceGet := func(ctx context.Context) (*apimodel.InstanceV1, gtserror.WithCode) {
 		return instance, nil
 	}
 
-	// do this check to make sure the status is actually from a local account,
-	// we shouldn't render threads from statuses that don't belong to us!
-	if _, errWithCode := m.processor.Account().GetLocalByUsername(ctx, authed.Account, username); errWithCode != nil {
-		apiutil.WebErrorHandler(c, errWithCode, instanceGet)
-		return
-	}
-
-	status, errWithCode := m.processor.Status().Get(ctx, authed.Account, statusID)
+	// Parse account targetUsername and status ID from the URL.
+	targetUsername, errWithCode := apiutil.ParseWebUsername(c.Param(apiutil.WebUsernameKey))
 	if errWithCode != nil {
 		apiutil.WebErrorHandler(c, errWithCode, instanceGet)
 		return
 	}
 
-	if !strings.EqualFold(username, status.Account.Username) {
-		err := gtserror.NewErrorNotFound(errors.New("path username not equal to status author username"))
+	targetStatusID, errWithCode := apiutil.ParseWebStatusID(c.Param(apiutil.WebStatusIDKey))
+	if errWithCode != nil {
+		apiutil.WebErrorHandler(c, errWithCode, instanceGet)
+		return
+	}
+
+	// Normalize requested username + status ID:
+	//
+	//   - Usernames on our instance are (currently) always lowercase.
+	//   - StatusIDs on our instance are (currently) always ULIDs.
+	//
+	// todo: Update this logic when different username patterns
+	// are allowed, and/or when status slugs are introduced.
+	targetUsername = strings.ToLower(targetUsername)
+	targetStatusID = strings.ToUpper(targetStatusID)
+
+	// Ensure status is actually from a local account; don't
+	// render threads from statuses that don't belong to us.
+	_, errWithCode = m.processor.Account().GetLocalByUsername(ctx, requestingAccount, targetUsername)
+	if errWithCode != nil {
+		apiutil.WebErrorHandler(c, errWithCode, instanceGet)
+		return
+	}
+
+	// Get the status itself from the processor using provided ID.
+	status, errWithCode := m.processor.Status().Get(ctx, requestingAccount, targetStatusID)
+	if errWithCode != nil {
+		apiutil.WebErrorHandler(c, errWithCode, instanceGet)
+		return
+	}
+
+	if status.Account.Username != targetUsername {
+		err := errors.New("path username not equal to status author username")
 		apiutil.WebErrorHandler(c, gtserror.NewErrorNotFound(err), instanceGet)
 		return
 	}
 
-	// if we're getting an AP request on this endpoint we
-	// should render the status's AP representation instead
-	accept := apiutil.NegotiateFormat(c, string(apiutil.TextHTML), string(apiutil.AppActivityJSON), string(apiutil.AppActivityLDJSON))
+	formats := []string{
+		string(apiutil.TextHTML),
+		string(apiutil.AppActivityJSON),
+		string(apiutil.AppActivityLDJSON),
+	}
+
+	// If we're getting an AP request on this endpoint we
+	// should render the status's AP representation instead.
+	accept := apiutil.NegotiateFormat(c, formats...)
 	if accept == string(apiutil.AppActivityJSON) || accept == string(apiutil.AppActivityLDJSON) {
-		m.returnAPStatus(c, username, statusID, accept)
+		m.returnAPStatus(c, targetUsername, targetStatusID, accept)
 		return
 	}
 
-	context, errWithCode := m.processor.Status().ContextGet(ctx, authed.Account, statusID)
+	context, errWithCode := m.processor.Status().ContextGet(ctx, requestingAccount, targetStatusID)
 	if errWithCode != nil {
 		apiutil.WebErrorHandler(c, errWithCode, instanceGet)
 		return
@@ -106,7 +131,7 @@ func (m *Module) threadGETHandler(c *gin.Context) {
 		distPathPrefix + "/status.css",
 	}
 	if config.GetAccountsAllowCustomCSS() {
-		stylesheets = append(stylesheets, "/@"+username+"/custom.css")
+		stylesheets = append(stylesheets, "/@"+targetUsername+"/custom.css")
 	}
 
 	c.HTML(http.StatusOK, "thread.tmpl", gin.H{
@@ -119,8 +144,13 @@ func (m *Module) threadGETHandler(c *gin.Context) {
 	})
 }
 
-func (m *Module) returnAPStatus(c *gin.Context, username string, statusID string, accept string) {
-	status, errWithCode := m.processor.Fedi().StatusGet(c.Request.Context(), username, statusID)
+func (m *Module) returnAPStatus(
+	c *gin.Context,
+	targetUsername string,
+	targetStatusID string,
+	accept string,
+) {
+	status, errWithCode := m.processor.Fedi().StatusGet(c.Request.Context(), targetUsername, targetStatusID)
 	if errWithCode != nil {
 		apiutil.WebErrorHandler(c, errWithCode, m.processor.InstanceGetV1)
 		return
